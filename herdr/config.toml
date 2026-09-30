@@ -1,0 +1,109 @@
+# herdvim's herdr config. install.sh links this to ~/.config/herdr/config.toml.
+# Reload after editing: prefix+shift+r, or `herdr server reload-config`.
+# Validate: `herdr config check`.
+# Full reference: https://herdr.dev/docs/configuration/
+
+# Skip herdr's first-run notification setup (herdr would otherwise write this
+# line itself, into this tracked file).
+onboarding = false
+
+[theme]
+name = "tokyo-night"
+
+[theme.custom]
+accent = "#ff5ef1"
+panel_bg = "reset"
+
+[terminal]
+new_cwd = "follow"
+
+[keys]
+prefix = "ctrl+b"
+
+# Escape hatch: ctrl+alt+h/j/k/l always moves herdr focus, even out of a
+# Neovim that can't reach herdr (for example one running inside a box).
+# herdr reads ctrl+alt+h as ctrl+alt+backspace (ctrl+h is the backspace control
+# code), so bind both.
+focus_pane_left = ["prefix+h", "ctrl+alt+h", "ctrl+alt+backspace"]
+focus_pane_down = ["prefix+j", "ctrl+alt+j"]
+focus_pane_up = ["prefix+k", "ctrl+alt+k"]
+focus_pane_right = ["prefix+l", "ctrl+alt+l"]
+split_vertical = ["prefix+v", "ctrl+alt+d"]
+split_horizontal = ["prefix+minus", "ctrl+alt+shift+d"]
+zoom = ["prefix+z", "ctrl+alt+z"]
+previous_tab = ["prefix+p", "ctrl+alt+["]
+next_tab = ["prefix+n", "ctrl+alt+]"]
+new_tab = ["prefix+c", "ctrl+alt+c"]
+last_pane = "prefix+tab"
+
+# Seamless ctrl+h/j/k/l across Neovim splits and herdr panes (see bin/herdr-nav).
+# Trade-off, same as vim-tmux-navigator: plain shells no longer receive these
+# keys, so ctrl+l won't clear the screen there. Type `clear` instead.
+[[keys.command]]
+key = "ctrl+h"
+type = "shell"
+command = "\"$HOME/.local/bin/herdr-nav\" left ctrl+h"
+description = "move left (nvim-aware)"
+
+[[keys.command]]
+key = "ctrl+j"
+type = "shell"
+command = "\"$HOME/.local/bin/herdr-nav\" down ctrl+j"
+description = "move down (nvim-aware)"
+
+[[keys.command]]
+key = "ctrl+k"
+type = "shell"
+command = "\"$HOME/.local/bin/herdr-nav\" up ctrl+k"
+description = "move up (nvim-aware)"
+
+[[keys.command]]
+key = "ctrl+l"
+type = "shell"
+command = "\"$HOME/.local/bin/herdr-nav\" right ctrl+l"
+description = "move right (nvim-aware)"
+
+# Boxes and remotes ----------------------------------------------------------
+
+[[keys.command]]
+key = "prefix+alt+b"
+type = "popup"
+command = "\"$HOME/.local/bin/hbox\" up --interactive"
+description = "new box (container)"
+width = "70%"
+height = "60%"
+
+[[keys.command]]
+key = "prefix+alt+s"
+type = "popup"
+command = "\"$HOME/.local/bin/hremote\" pick"
+description = "connect to an SSH host"
+width = "70%"
+height = "60%"
+
+[[keys.command]]
+key = "prefix+alt+g"
+type = "popup"
+command = "lazygit"
+description = "lazygit"
+width = "90%"
+height = "90%"
+
+# Sidebar: color boxes and remotes so they can't be mistaken for local work.
+# hbox and hremote report the `env` token on the workspaces they create;
+# Neovim reports `env` and `file` on its own pane.
+[ui.sidebar.spaces]
+rows = [
+  ["state_icon", { token = "$env", bold = true, rules = [
+    { contains = "@", fg = "#b58cff" },
+    { starts_with = "box:", fg = "#ffa14f" },
+    { starts_with = "ssh:", fg = "#5ef1ff" },
+  ] }, "workspace"],
+  ["branch", "git_status"],
+]
+
+[ui.sidebar.agents]
+rows = [
+  ["state_icon", { token = "machine", fg = "#5ef1ff", bold = true }, "workspace", "tab"],
+  ["agent", { token = "$file", dim = true }],
+]

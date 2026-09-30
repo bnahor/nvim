@@ -1,17 +1,43 @@
--- Entry point for the Neovim configuration.
+-- herdvim: a plain Neovim 0.12+ config built on vim.pack, with herdr as the
+-- terminal/pane layer. No distro, no third-party plugin manager.
 --
--- Runtime layout:
---   lua/core/     editor options, keymaps, autocmds, plugin bootstrap
---   lua/config/   shared configuration data
---   lua/plugins/  lazy.nvim plugin specs grouped by concern
---
--- See README.md for installation notes, keymaps, and structure.
+-- Load order matters:
+--   core.options  -> leader keys and editor defaults (before any mappings)
+--   core.env      -> where are we running? (local / box / remote) and its accent color
+--   core.pack     -> tiny helpers around vim.pack
+--   plugins.*     -> each file installs and configures one area
+--   core.herdr    -> herdr-aware navigation, terminals, runners and agents
+--   core.keymaps  -> editor keymaps that don't belong to a plugin
+--   local.lua     -> optional, git-ignored personal overrides
 
--- Load core configuration modules
+if vim.fn.has 'nvim-0.12' == 0 then
+  vim.notify('herdvim needs Neovim 0.12+ (for vim.pack). Found ' .. tostring(vim.version()), vim.log.levels.ERROR)
+  return
+end
+
 require 'core.options'
+require 'core.env'
+require 'core.pack'
+
+for _, name in ipairs {
+  'ui',
+  'editor',
+  'treesitter',
+  'lsp',
+  'completion',
+  'git',
+  'files',
+  'lang',
+  'ai',
+} do
+  local ok, err = pcall(require, 'plugins.' .. name)
+  if not ok then
+    vim.notify(('plugins.%s failed to load:\n%s'):format(name, err), vim.log.levels.ERROR)
+  end
+end
+
+require('core.herdr').setup()
 require 'core.keymaps'
 require 'core.autocmds'
-require 'core.lazy'
 
--- The line beneath this is called `modeline`. See `:help modeline`
--- vim: ts=2 sts=2 sw=2 et
+pcall(require, 'local')

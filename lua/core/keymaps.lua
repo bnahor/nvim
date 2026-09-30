@@ -1,49 +1,33 @@
--- ============================================================================
--- Core Keymaps
--- ============================================================================
--- Basic keymaps that don't depend on plugins.
--- Plugin-specific keymaps should be defined in their respective plugin configs.
--- See `:help vim.keymap.set()` for more information.
--- ============================================================================
+-- Editor keymaps that don't belong to a specific plugin.
+-- Plugin keymaps live next to the plugin in lua/plugins/*.lua,
+-- herdr keymaps live in lua/core/herdr.lua.
 
--- Clear search highlights
-vim.keymap.set('n', '<Esc>', '<cmd>nohlsearch<CR>')
+local map = vim.keymap.set
 
--- Diagnostics
-vim.keymap.set('n', '<leader>q', vim.diagnostic.setloclist, { desc = 'Open diagnostic [Q]uickfix list' })
+map('n', '<Esc>', '<cmd>nohlsearch<CR>')
+map('t', '<Esc><Esc>', '<C-\\><C-n>', { desc = 'Exit terminal mode' })
 
--- Quickfix navigation
-vim.keymap.set('n', ']q', ':cnext<CR>', { desc = 'Next quickfix item' })
-vim.keymap.set('n', '[q', ':cprevious<CR>', { desc = 'Previous quickfix item' })
+map('n', '<leader>q', vim.diagnostic.setloclist, { desc = 'Diagnostics to loclist' })
+map('n', ']q', '<cmd>cnext<CR>', { desc = 'Next quickfix item' })
+map('n', '[q', '<cmd>cprevious<CR>', { desc = 'Previous quickfix item' })
+map('n', '<leader>bd', function()
+  Snacks.bufdelete()
+end, { desc = '[B]uffer [D]elete' })
 
--- Buffer management
-vim.keymap.set('n', '<leader>bd', ':bd<CR>', { desc = '[B]uffer [D]elete (close)' })
-
--- Window navigation (CTRL+hjkl)
-vim.keymap.set('n', '<C-h>', '<C-w><C-h>', { desc = 'Move focus to the left window' })
-vim.keymap.set('n', '<C-l>', '<C-w><C-l>', { desc = 'Move focus to the right window' })
-vim.keymap.set('n', '<C-j>', '<C-w><C-j>', { desc = 'Move focus to the lower window' })
-vim.keymap.set('n', '<C-k>', '<C-w><C-k>', { desc = 'Move focus to the upper window' })
-
--- Visual line movement (j/k respect wrapped lines when no count)
-vim.keymap.set({ 'n', 'v' }, 'k', "v:count == 0 ? 'gk' : 'k'", { expr = true })
-vim.keymap.set({ 'n', 'v' }, 'j', "v:count == 0 ? 'gj' : 'j'", { expr = true })
-
--- Line navigation (visual lines)
-vim.keymap.set({ 'n', 'v' }, '0', 'g0', { desc = 'Visual line start' })
-vim.keymap.set({ 'n', 'v' }, '_', 'g^', { desc = 'Visual line first non-blank' })
-vim.keymap.set({ 'n', 'v' }, '$', 'g$', { desc = 'Visual line end' })
-
--- Toggle spell checking
-vim.keymap.set('n', '<leader>ts', function()
+map('n', '<leader>ts', function()
   vim.wo.spell = not vim.wo.spell
 end, { desc = '[T]oggle [S]pell' })
 
-vim.api.nvim_create_user_command('Undotree', function()
-  vim.cmd.packadd 'nvim.undotree'
-  require('undotree').open {
-    command = 'botright 35vnew',
-  }
-end, { desc = 'Toggle builtin undo tree' })
+-- Move by visual lines when wrapping, unless a count is given.
+map({ 'n', 'v' }, 'k', "v:count == 0 ? 'gk' : 'k'", { expr = true })
+map({ 'n', 'v' }, 'j', "v:count == 0 ? 'gj' : 'j'", { expr = true })
+map({ 'n', 'v' }, '0', 'g0', { desc = 'Visual line start' })
+map({ 'n', 'v' }, '_', 'g^', { desc = 'Visual line first non-blank' })
+map({ 'n', 'v' }, '$', 'g$', { desc = 'Visual line end' })
 
-vim.keymap.set('n', '<leader>uu', '<cmd>Undotree<CR>', { desc = '[U]ndo Tree' })
+-- Keep the selection when indenting.
+map('v', '<', '<gv')
+map('v', '>', '>gv')
+
+map('n', '<leader>pu', '<cmd>PackUpdate<CR>', { desc = '[P]lugins: [U]pdate' })
+map('n', '<leader>ps', '<cmd>PackStatus<CR>', { desc = '[P]lugins: [S]tatus' })

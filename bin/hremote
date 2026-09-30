@@ -1,0 +1,264 @@
+#!/usr/bin/env bash
+# hremote — bring herdvim to any SSH host, and open it in a color-coded herdr
+# workspace. Idempotent: every command checks what's there before changing it.
+#
+#   hremote HOST              open a cyan workspace with a self-reconnecting SSH
+#                             shell (bootstraps HOST first if needed)
+#   hremote setup HOST        install Neovim + tools + this config on HOST, and add
+#                             HOST as a herdr machine (persistent remote sessions)
+#   hremote sync HOST         push config changes to HOST
+#   hremote doctor HOST       check connectivity and what's installed
+#   hremote pick              choose a host from ~/.ssh/config (herdr prefix+alt+s)
+#   hremote uninstall HOST    remove herdvim from HOST (leaves Neovim/tools)
+#
+# On the host, the config lives in ~/.config/herdvim and runs as `hv`
+# (NVIM_APPNAME=herdvim), so an existing ~/.config/nvim is never touched.
+#
+# Options for setup:
+#   --no-herdr     don't register HOST as a herdr machine
+#   --lsp LIST     language servers to install there (default: lua_ls,pyright,ts_ls,marksman)
+set -euo pipefail
+
+SELF=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}")
+REPO=$(cd "$(dirname "$SELF")/.." && pwd)
+STATE=${XDG_STATE_HOME:-$HOME/.local/state}/hremote
+COLOR=${HREMOTE_COLOR:-#5ef1ff}
+mkdir -p "$STATE"
+chmod 700 "$STATE"
+
+say() { printf '\033[1;38;2;94;241;255m[hremote]\033[0m %s\n' "$*" >&2; }
+die() { printf '\033[1;31m[hremote]\033[0m %s\n' "$*" >&2; exit 1; }
+
+# Keepalives notice a dead link in ~1 minute instead of hanging; one shared
+# connection per host makes the many small steps below fast and ask for
+# credentials at most once.
+SSH_OPTS=(
+  -o ServerAliveInterval=15 -o ServerAliveCountMax=4
+  -o ConnectTimeout=15
+  -o ControlMaster=auto -o "ControlPath=$STATE/cm-%C" -o ControlPersist=10m
+)
+# Use another ssh config file (default: ~/.ssh/config).
+[ -z "${HREMOTE_SSH_CONFIG:-}" ] || SSH_OPTS=(-F "$HREMOTE_SSH_CONFIG" "${SSH_OPTS[@]}")
+
+rssh() { local host=$1; shift; ssh "${SSH_OPTS[@]}" "$host" "$@"; }
+
+local_rev() {
+  # Content hash of tracked files, so uncommitted edits count as a new version.
+  (cd "$REPO" && git ls-files -s && git diff HEAD) 2>/dev/null | git hash-object --stdin 2>/dev/null | cut -c1-12 || echo dev
+}
+
+short() { sed 's/.*@//; s/\..*//' <<<"$1"; }
+
+# ---------------------------------------------------------------------------
+
+check_reachable() {
+  local host=$1
+  rssh "$host" true 2>/dev/null && return
+  # Retry interactively so password / 2FA / host-key prompts can be answered.
+  say "connecting to $host"
+  ssh "${SSH_OPTS[@]}" -o BatchMode=no "$host" true || die "can't SSH to $host — try 'ssh $host' by hand first"
+}
+
+push_config() {
+  local host=$1 rev
+  rev=$(local_rev)
+  say "sending config ($rev)"
+  # Unpack beside the old copy and swap, so an interrupted transfer never leaves a half config.
+  (cd "$REPO" && git ls-files -z --cached --others --exclude-standard | COPYFILE_DISABLE=1 tar --no-xattrs --null -T - -czf -) |
+    rssh "$host" "set -e
+      rm -rf ~/.config/herdvim.new && mkdir -p ~/.config/herdvim.new
+      tar -xzf - -C ~/.config/herdvim.new
+      echo $rev > ~/.config/herdvim.new/.herdvim-rev
+      rm -rf ~/.config/herdvim.old
+      [ ! -e ~/.config/herdvim ] || mv ~/.config/herdvim ~/.config/herdvim.old
+      mv ~/.config/herdvim.new ~/.config/herdvim
+      rm -rf ~/.config/herdvim.old"
+}
+
+remote_bootstrap() {
+  local host=$1 lsp=$2
+  say "installing Neovim and tools into ~/.local on $host"
+  rssh "$host" "PREFIX=\$HOME/.local sh ~/.config/herdvim/scripts/install-tools.sh"
+
+  say "installing hv, herdr-nav and shell setup"
+  rssh "$host" "set -e
+    mkdir -p ~/.local/bin
+    cat > ~/.local/bin/hv <<'EOF'
+#!/bin/sh
+# herdvim on this host — installed by hremote
+export NVIM_APPNAME=herdvim
+export HERDVIM_LSP=\"\${HERDVIM_LSP:-$lsp}\"
+exec \"\$HOME/.local/bin/nvim\" \"\$@\"
+EOF
+    chmod +x ~/.local/bin/hv
+    ln -sf ~/.config/herdvim/bin/herdr-nav ~/.local/bin/herdr-nav
+
+    block='# >>> herdvim >>>
+case \":\$PATH:\" in *\":\$HOME/.local/bin:\"*) ;; *) export PATH=\"\$HOME/.local/bin:\$PATH\" ;; esac
+[ -n \"\${EDITOR:-}\" ] || export EDITOR=hv
+alias v=hv
+# <<< herdvim <<<'
+    for rc in ~/.bashrc ~/.zshrc; do
+      [ -e \"\$rc\" ] || [ \"\$rc\" = ~/.bashrc ] || continue
+      touch \"\$rc\"
+      grep -q '>>> herdvim >>>' \"\$rc\" || printf '\n%s\n' \"\$block\" >> \"\$rc\"
+    done
+
+    # herdr on this host reads ~/.config/herdr/config.toml. Link ours unless
+    # the user already has one (theirs wins).
+    mkdir -p ~/.config/herdr
+    if [ ! -e ~/.config/herdr/config.toml ]; then
+      ln -s ~/.config/herdvim/herdr/config.toml ~/.config/herdr/config.toml
+    fi"
+
+  say "installing plugins, parsers and language servers (first time takes a few minutes)"
+  rssh "$host" "~/.local/bin/hv --headless +qa! >/dev/null 2>&1; ~/.local/bin/hv --headless +MasonToolsInstallSync +qa! 2>&1 | tail -n 3" || say "plugin install reported a problem; run 'hremote doctor $host'"
+}
+
+register_herdr_machine() {
+  local host=$1
+  command -v herdr >/dev/null || return 0
+  if herdr machine list --json 2>/dev/null | grep -q "\"$host\""; then
+    say "$host is already a herdr machine"
+    return
+  fi
+  say "adding $host to herdr (it may offer to install herdr there — say yes for persistent sessions)"
+  herdr machine add "$host" --label "$(short "$host")" || say "herdr machine add didn't finish; retry with: herdr machine add $host"
+}
+
+cmd_setup() {
+  local host="" herdr_machine=1 lsp=${HERDVIM_LSP:-lua_ls,pyright,ts_ls,marksman}
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --no-herdr) herdr_machine=0; shift ;;
+      --lsp) lsp=$2; shift 2 ;;
+      -*) die "setup: unknown option $1" ;;
+      *) host=$1; shift ;;
+    esac
+  done
+  [ -n "$host" ] || die "usage: hremote setup HOST"
+  check_reachable "$host"
+  push_config "$host"
+  remote_bootstrap "$host" "$lsp"
+  [ $herdr_machine = 1 ] && register_herdr_machine "$host"
+  say "done — on $host run 'hv' (new shells pick up PATH); here: 'hremote $host'"
+}
+
+cmd_sync() {
+  local host=${1:?usage: hremote sync HOST}
+  check_reachable "$host"
+  push_config "$host"
+  rssh "$host" "~/.local/bin/hv --headless +qa! >/dev/null 2>&1 || true"
+  say "synced $host"
+}
+
+# Bootstrap on first use, sync when the local config changed, otherwise nothing.
+ensure_ready() {
+  local host=$1 have
+  check_reachable "$host"
+  have=$(rssh "$host" 'cat ~/.config/herdvim/.herdvim-rev 2>/dev/null; test -x ~/.local/bin/hv && echo hv-ok' 2>/dev/null || true)
+  if ! grep -q hv-ok <<<"$have"; then
+    say "$host doesn't have herdvim yet — setting it up"
+    cmd_setup "$host" --no-herdr
+  elif ! grep -qx "$(local_rev)" <<<"$have"; then
+    cmd_sync "$host"
+  fi
+}
+
+# Self-reconnecting SSH shell. Exit status 255 means the connection failed or
+# dropped; anything else is the remote shell exiting on purpose.
+cmd_shell() {
+  local host=${1:?usage: hremote shell HOST} delay=2 rc
+  printf '\e]2;ssh:%s\a' "$(short "$host")"
+  while :; do
+    set +e
+    ssh "${SSH_OPTS[@]}" -t "$host"
+    rc=$?
+    set -e
+    [ $rc -eq 255 ] || exit $rc
+    printf '\n\033[1;38;2;94;241;255m[hremote]\033[0m connection to %s lost — reconnecting in %ss (ctrl+c to stop)\n' "$host" "$delay"
+    sleep "$delay"
+    delay=$((delay * 2 > 60 ? 60 : delay * 2))
+    rssh "$host" true 2>/dev/null && delay=2
+  done
+}
+
+cmd_open() {
+  local host=${1:?usage: hremote HOST}
+  ensure_ready "$host"
+  local in_herdr=0
+  { [ -n "${HERDR_SOCKET_PATH:-}" ] || [ "${HERDR_ENV:-}" = 1 ]; } && in_herdr=1
+  if [ $in_herdr = 0 ] || ! command -v jq >/dev/null; then
+    exec "$SELF" shell "$host"
+  fi
+  local h=${HERDR_BIN_PATH:-herdr} label res ws pane
+  label="ssh:$(short "$host")"
+  res=$("$h" workspace create --label "󰣀 $(short "$host")" --cwd "$HOME" --focus)
+  ws=$(jq -r .result.workspace.workspace_id <<<"$res")
+  pane=$(jq -r .result.root_pane.pane_id <<<"$res")
+  "$h" workspace report-metadata "$ws" --source hremote --token "env=$label" >/dev/null
+  "$h" pane report-metadata "$pane" --source hremote --token "env=$label" >/dev/null
+  local envs=""
+  [ -z "${HREMOTE_SSH_CONFIG:-}" ] || envs="HREMOTE_SSH_CONFIG=$(printf %q "$HREMOTE_SSH_CONFIG") "
+  "$h" pane run "$pane" "exec env ${envs}$(printf %q "$SELF") shell $(printf %q "$host")" >/dev/null
+}
+
+cmd_pick() {
+  local hosts=()
+  local f
+  for f in ~/.ssh/config ~/.ssh/config.d/*; do
+    [ -f "$f" ] || continue
+    while read -r kw rest; do
+      [ "$(tr "[:upper:]" "[:lower:]" <<<"$kw")" = host ] || continue
+      for h in $rest; do
+        [[ $h == *[*?!]* ]] || hosts+=("$h")
+      done
+    done <"$f"
+  done 2>/dev/null
+  [ ${#hosts[@]} -gt 0 ] || die "no hosts in ~/.ssh/config — run: hremote HOST"
+  local host
+  if command -v fzf >/dev/null; then
+    host=$(printf '%s\n' "${hosts[@]}" | sort -u | fzf --prompt '󰣀 host> ' --print-query | tail -n1)
+  else
+    printf '\033[1;38;2;94;241;255m󰣀 Connect to\033[0m\n'
+    select host in $(printf '%s\n' "${hosts[@]}" | sort -u); do break; done
+  fi
+  [ -n "${host:-}" ] || exit 0
+  cmd_open "$host"
+}
+
+cmd_doctor() {
+  local host=${1:?usage: hremote doctor HOST}
+  check_reachable "$host"
+  say "local config version: $(local_rev)"
+  rssh "$host" 'printf "host:      %s %s\n" "$(uname -s)" "$(uname -m)"
+    printf "config:    %s\n" "$(cat ~/.config/herdvim/.herdvim-rev 2>/dev/null || echo missing)"
+    for t in nvim tree-sitter rg fd lazygit git cc node herdr; do
+      p=$(PATH=$HOME/.local/bin:$PATH command -v $t 2>/dev/null) && printf "%-10s %s\n" "$t:" "$p" || printf "%-10s MISSING\n" "$t:"
+    done
+    ~/.local/bin/hv --headless +"lua io.stdout:write(\"plugins:   \" .. #vim.pack.get() .. \"\\n\")" +qa! 2>&1'
+}
+
+cmd_uninstall() {
+  local host=${1:?usage: hremote uninstall HOST}
+  rssh "$host" 'set -e
+    [ "$(readlink ~/.config/herdr/config.toml 2>/dev/null)" = "$HOME/.config/herdvim/herdr/config.toml" ] && rm ~/.config/herdr/config.toml
+    rmdir ~/.config/herdr 2>/dev/null || true
+    rm -rf ~/.config/herdvim ~/.local/share/herdvim ~/.local/state/herdvim ~/.cache/herdvim ~/.local/bin/hv ~/.local/bin/herdr-nav
+    for rc in ~/.bashrc ~/.zshrc; do
+      [ -f "$rc" ] && sed -i.herdvim-bak "/# >>> herdvim >>>/,/# <<< herdvim <<</d" "$rc"
+    done; true'
+  say "removed herdvim from $host (Neovim and tools in ~/.local/bin were left in place)"
+}
+
+case ${1:-} in
+  setup) shift; cmd_setup "$@" ;;
+  sync) shift; cmd_sync "$@" ;;
+  shell) shift; cmd_shell "$@" ;;
+  doctor) shift; cmd_doctor "$@" ;;
+  pick) cmd_pick ;;
+  uninstall) shift; cmd_uninstall "$@" ;;
+  -h | --help | help | "") sed -n '2,/^set -euo/p' "$SELF" | sed '$d; s/^# \{0,1\}//' ;;
+  -*) die "unknown option $1" ;;
+  *) cmd_open "$1" ;;
+esac

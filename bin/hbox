@@ -1,0 +1,343 @@
+#!/usr/bin/env bash
+# hbox — disposable, color-coded dev containers with herdvim inside, opened as
+# herdr workspaces. Works against local Docker or any SSH host running Docker.
+#
+#   hbox up [NAME] [options]      create a box and open it (in herdr if available)
+#   hbox sh NAME [CMD...]         shell (or command) in a box
+#   hbox nvim NAME [PATH]         Neovim in a box
+#   hbox open NAME                open an existing box as a herdr workspace
+#   hbox ls                       list boxes (local and every host used before)
+#   hbox stop|start|rm NAME       lifecycle (rm also forgets the box)
+#   hbox build [--host HOST]      (re)build the image from this repo
+#                                 (HBOX_LSP=pyright,ts_ls picks the baked-in language servers)
+#
+# up options:
+#   --dir PATH     bind-mount PATH into the box (default: current dir, local only)
+#   --copy PATH    copy PATH into the box instead: edits stay inside the box
+#   --clone URL    git clone URL inside the box
+#   --empty        start with an empty /work
+#   --host HOST    run on HOST's Docker over SSH (implies --copy of the current dir)
+#   --no-net       no network access
+#   --cpus N / --memory SIZE   resource limits (e.g. --cpus 4 --memory 8g)
+#   --image IMG    use another image (must have bash; herdvim extras need ours)
+#   --no-open      create only; don't open a shell or herdr workspace
+#   --interactive  ask for the options (used by herdr's prefix+alt+b popup)
+set -euo pipefail
+
+SELF=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}")
+REPO=$(cd "$(dirname "$SELF")/.." && pwd)
+IMAGE=${HBOX_IMAGE:-herdvim-box:latest}
+STATE=${XDG_STATE_HOME:-$HOME/.local/state}/hbox
+HOSTS_FILE=$STATE/hosts
+COLOR_LOCAL=${HBOX_COLOR:-#ffa14f}
+COLOR_REMOTE=${HBOX_REMOTE_COLOR:-#b58cff}
+mkdir -p "$STATE"
+touch "$HOSTS_FILE"
+
+say() { printf '\033[1;38;2;255;161;79m[hbox]\033[0m %s\n' "$*" >&2; }
+die() { printf '\033[1;31m[hbox]\033[0m %s\n' "$*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || die "$1 is required${2:+ ($2)}"; }
+
+need docker "install Docker Desktop, OrbStack or docker-ce"
+
+in_herdr() { [ -n "${HERDR_SOCKET_PATH:-}" ] || [ "${HERDR_ENV:-}" = 1 ]; }
+herdr_bin() { echo "${HERDR_BIN_PATH:-herdr}"; }
+
+# Run docker against HOST (empty = local).
+dk() {
+  local host=$1; shift
+  if [ -n "$host" ]; then
+    DOCKER_HOST="ssh://$host" docker "$@"
+  else
+    docker "$@"
+  fi
+}
+
+container() { echo "hbox-$1"; }
+
+# Which host does box NAME live on? Checks local first, then known hosts.
+host_of() {
+  local name=$1 h
+  if docker container inspect "$(container "$name")" >/dev/null 2>&1; then
+    echo ""
+    return
+  fi
+  while read -r h; do
+    [ -n "$h" ] || continue
+    if dk "$h" container inspect "$(container "$name")" >/dev/null 2>&1; then
+      echo "$h"
+      return
+    fi
+  done <"$HOSTS_FILE"
+  die "no box named $name (see: hbox ls)"
+}
+
+label_of() { # name host
+  if [ -n "$2" ]; then echo "box:$1@$2"; else echo "box:$1"; fi
+}
+
+sanitize() { tr '[:upper:]' '[:lower:]' <<<"$1" | tr -c 'a-z0-9-\n' '-' | sed 's/^-*//; s/-*$//' | cut -c1-40; }
+
+# ---------------------------------------------------------------------------
+
+cmd_build() {
+  local host=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --host) host=$2; shift 2 ;;
+      *) die "build: unknown option $1" ;;
+    esac
+  done
+  local rev
+  rev=$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo dev)
+  say "building $IMAGE${host:+ on $host} from $REPO ($rev) — first build takes a few minutes"
+  local args=(build -f "$REPO/container/Dockerfile" -t "$IMAGE" --label "herdvim.rev=$rev")
+  [ -n "${HBOX_LSP:-}" ] && args+=(--build-arg "HERDVIM_LSP=$HBOX_LSP")
+  dk "$host" "${args[@]}" "$REPO"
+}
+
+ensure_image() {
+  local host=$1
+  if ! dk "$host" image inspect "$IMAGE" >/dev/null 2>&1; then
+    if [ "$IMAGE" = herdvim-box:latest ]; then
+      cmd_build ${host:+--host "$host"}
+    else
+      dk "$host" pull "$IMAGE"
+    fi
+    return
+  fi
+  local have want
+  have=$(dk "$host" image inspect -f '{{ index .Config.Labels "herdvim.rev" }}' "$IMAGE" 2>/dev/null || true)
+  want=$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo dev)
+  if [ -n "$have" ] && [ "$have" != "$want" ]; then
+    say "image was built from $have, config is at $want — run 'hbox build${host:+ --host $host}' to refresh"
+  fi
+}
+
+# Copy a directory into /work/<proj>. In a git repo, copy tracked + untracked
+# (non-ignored) files and .git, skipping build output and node_modules.
+copy_in() { # host name src dest
+  local host=$1 name=$2 src=$3 dest=$4 c
+  c=$(container "$name")
+  dk "$host" exec -u root "$c" mkdir -p "$dest"
+  if git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    (
+      cd "$src"
+      { git ls-files -z --cached --others --exclude-standard; printf '.git\0'; } |
+        COPYFILE_DISABLE=1 tar --no-xattrs --null -T - -cf -
+    ) | dk "$host" exec -i -u root "$c" tar -C "$dest" -xf -
+  else
+    COPYFILE_DISABLE=1 tar --no-xattrs -C "$src" -cf - . | dk "$host" exec -i -u root "$c" tar -C "$dest" -xf -
+  fi
+  dk "$host" exec -u root "$c" chown -R dev:dev "$dest"
+}
+
+cmd_up() {
+  local name="" mode="" src="" url="" host="" net=1 cpus="" mem="" open=1 interactive=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --dir) mode=mount; src=$2; shift 2 ;;
+      --copy) mode=copy; src=$2; shift 2 ;;
+      --clone) mode=clone; url=$2; shift 2 ;;
+      --empty) mode=empty; shift ;;
+      --host) host=$2; shift 2 ;;
+      --no-net) net=0; shift ;;
+      --cpus) cpus=$2; shift 2 ;;
+      --memory) mem=$2; shift 2 ;;
+      --image) IMAGE=$2; shift 2 ;;
+      --no-open) open=0; shift ;;
+      --interactive) interactive=1; shift ;;
+      -*) die "up: unknown option $1" ;;
+      *) name=$1; shift ;;
+    esac
+  done
+
+  local base=${HERDR_ACTIVE_PANE_CWD:-$PWD}
+
+  if [ $interactive = 1 ]; then
+    local def ans
+    def=$(sanitize "$(basename "$base")")
+    printf '\033[1;38;2;255;161;79m󰆧 New box\033[0m  (source: %s)\n\n' "$base"
+    read -rp "Name [$def]: " ans; name=${ans:-$def}
+    read -rp "Host (empty = this machine): " host
+    if [ -z "$host" ]; then
+      read -rp "Files: [m]ount here, [c]opy in, [e]mpty, or a git URL [m]: " ans
+    else
+      read -rp "Files: [c]opy in, [e]mpty, or a git URL [c]: " ans
+      ans=${ans:-c}
+    fi
+    case ${ans:-m} in
+      m | M) mode=mount; src=$base ;;
+      c | C) mode=copy; src=$base ;;
+      e | E) mode=empty ;;
+      *) mode=clone; url=$ans ;;
+    esac
+    read -rp "Network [Y/n]: " ans; [[ ${ans:-y} =~ ^[nN] ]] && net=0
+  fi
+
+  if [ -z "$mode" ]; then
+    src=$base
+    if [ -n "$host" ]; then mode=copy; else mode=mount; fi
+  fi
+  if [ "$mode" = mount ] && [ -n "$host" ]; then
+    die "--dir can't bind-mount a local folder on $host; use --copy, --clone or --empty"
+  fi
+  [ -z "$src" ] || src=$(cd "$src" && pwd)
+
+  if [ -z "$name" ]; then
+    if [ -n "$src" ]; then name=$(basename "$src"); elif [ -n "$url" ]; then name=$(basename "$url" .git); else name=box; fi
+  fi
+  name=$(sanitize "$name")
+  [ -n "$name" ] || die "invalid box name"
+  local c
+  c=$(container "$name")
+
+  if dk "$host" container inspect "$c" >/dev/null 2>&1; then
+    say "box $name already exists — opening it"
+    [ $open = 1 ] && cmd_open "$name"
+    return
+  fi
+
+  if [ -n "$host" ]; then
+    say "checking Docker on $host"
+    dk "$host" version --format '{{.Server.Version}}' >/dev/null ||
+      die "can't reach Docker on $host over SSH (need docker there, and your user in the docker group)"
+    grep -qxF "$host" "$HOSTS_FILE" || echo "$host" >>"$HOSTS_FILE"
+  fi
+
+  ensure_image "$host"
+
+  local proj=work workdir=/work color=$COLOR_LOCAL
+  [ -n "$host" ] && color=$COLOR_REMOTE
+  [ -n "$src" ] && proj=$(basename "$src")
+  [ -n "$url" ] && proj=$(basename "$url" .git)
+  [ "$mode" != empty ] && workdir=/work/$proj
+
+  local args=(
+    run -d --name "$c" --hostname "$name" --init
+    --label "herdvim.box=$name" --label "herdvim.mode=$mode" --label "herdvim.workdir=$workdir"
+    --label "herdvim.src=${src:-$url}"
+    -e "HBOX_NAME=$name" -e "HBOX_HOST=$host" -e "HERDVIM_COLOR=$color"
+  )
+  [ $net = 0 ] && args+=(--network none)
+  [ -n "$cpus" ] && args+=(--cpus "$cpus")
+  [ -n "$mem" ] && args+=(--memory "$mem")
+  [ "$mode" = mount ] && args+=(-v "$src:$workdir")
+
+  # Git identity, and your SSH agent for git push (Docker Desktop / OrbStack).
+  local gname gmail
+  gname=$(git config --global user.name 2>/dev/null || true)
+  gmail=$(git config --global user.email 2>/dev/null || true)
+  [ -n "$gname" ] && args+=(-e "GIT_AUTHOR_NAME=$gname" -e "GIT_COMMITTER_NAME=$gname")
+  [ -n "$gmail" ] && args+=(-e "GIT_AUTHOR_EMAIL=$gmail" -e "GIT_COMMITTER_EMAIL=$gmail")
+  if [ -z "$host" ] && [ -n "${SSH_AUTH_SOCK:-}" ] && [ "$(uname -s)" = Darwin ]; then
+    args+=(-v /run/host-services/ssh-auth.sock:/run/host-services/ssh-auth.sock -e SSH_AUTH_SOCK=/run/host-services/ssh-auth.sock)
+  fi
+
+  say "creating $name${host:+ on $host} ($mode${src:+ $src}${url:+ $url})"
+  dk "$host" "${args[@]}" "$IMAGE" sleep infinity >/dev/null
+
+  case $mode in
+    copy) say "copying files in"; copy_in "$host" "$name" "$src" "$workdir" ;;
+    clone) dk "$host" exec "$c" git clone "$url" "$workdir" ;;
+    empty) ;;
+  esac
+
+  say "ready: $(label_of "$name" "$host")"
+  [ $open = 1 ] && cmd_open "$name"
+  return 0
+}
+
+cmd_open() {
+  local name=${1:?usage: hbox open NAME} host label color dir
+  host=$(host_of "$name")
+  label=$(label_of "$name" "$host")
+  if [ -n "$host" ]; then color=$COLOR_REMOTE; else color=$COLOR_LOCAL; fi
+
+  if ! in_herdr; then
+    exec "$SELF" sh "$name"
+  fi
+  need jq "used to read herdr's JSON"
+
+  # Workspace cwd: the mounted/copied source folder when it exists locally.
+  dir=$(dk "$host" container inspect -f '{{ index .Config.Labels "herdvim.src" }}' "$(container "$name")")
+  [ -d "$dir" ] || dir=$HOME
+
+  local h res ws pane
+  h=$(herdr_bin)
+  res=$("$h" workspace create --label "󰆧 $name${host:+@$host}" --cwd "$dir" \
+    --env "HBOX_NAME=$name" --env "HBOX_HOST=$host" --env "HERDVIM_COLOR=$color" --focus)
+  ws=$(jq -r .result.workspace.workspace_id <<<"$res")
+  pane=$(jq -r .result.root_pane.pane_id <<<"$res")
+  "$h" workspace report-metadata "$ws" --source hbox --token "env=$label" >/dev/null
+  "$h" pane report-metadata "$pane" --source hbox --token "env=$label" >/dev/null
+  "$h" pane run "$pane" "exec $(printf %q "$SELF") sh $(printf %q "$name")" >/dev/null
+}
+
+cmd_sh() {
+  local name=${1:?usage: hbox sh NAME [CMD...]} host c workdir
+  shift
+  host=$(host_of "$name")
+  c=$(container "$name")
+  if [ "$(dk "$host" container inspect -f '{{.State.Running}}' "$c")" != true ]; then
+    say "starting $name"
+    dk "$host" start "$c" >/dev/null
+  fi
+  workdir=$(dk "$host" container inspect -f '{{ index .Config.Labels "herdvim.workdir" }}' "$c")
+  local tty=-i
+  [ -t 0 ] && tty=-it
+  if [ $# -eq 0 ]; then set -- bash -l; fi
+  if [ -n "$host" ]; then
+    exec env DOCKER_HOST="ssh://$host" docker exec $tty -e TERM="${TERM:-xterm-256color}" -e COLORTERM=truecolor -w "$workdir" "$c" "$@"
+  fi
+  exec docker exec $tty -e TERM="${TERM:-xterm-256color}" -e COLORTERM=truecolor -w "$workdir" "$c" "$@"
+}
+
+cmd_nvim() {
+  local name=${1:?usage: hbox nvim NAME [PATH]}
+  shift
+  cmd_sh "$name" nvim "$@"
+}
+
+cmd_ls() {
+  local fmt='table {{ .Label "herdvim.box" }}\t{{ .Status }}\t{{ .Label "herdvim.mode" }}\t{{ .Label "herdvim.src" }}'
+  echo "── local"
+  docker ps -a --filter label=herdvim.box --format "$fmt"
+  local h
+  while read -r h; do
+    [ -n "$h" ] || continue
+    echo "── $h"
+    dk "$h" ps -a --filter label=herdvim.box --format "$fmt" 2>/dev/null || echo "(unreachable)"
+  done <"$HOSTS_FILE"
+}
+
+cmd_lifecycle() {
+  local verb=$1 name=${2:?usage: hbox $1 NAME} host
+  host=$(host_of "$name")
+  case $verb in
+    stop) dk "$host" stop -t 3 "$(container "$name")" >/dev/null ;;
+    start) dk "$host" start "$(container "$name")" >/dev/null ;;
+    rm)
+      if [ -t 0 ]; then
+        read -rp "Delete box $name${host:+ on $host} and everything inside it that isn't bind-mounted? [y/N] " ans
+        [[ $ans =~ ^[yY] ]] || exit 1
+      fi
+      dk "$host" rm -f "$(container "$name")" >/dev/null
+      ;;
+  esac
+  say "$verb: $name"
+}
+
+usage() { sed -n '2,/^set -euo/p' "$SELF" | sed '$d; s/^# \{0,1\}//'; }
+
+case ${1:-} in
+  up) shift; cmd_up "$@" ;;
+  sh | shell) shift; cmd_sh "$@" ;;
+  nvim | vim) shift; cmd_nvim "$@" ;;
+  open) shift; cmd_open "$@" ;;
+  ls | list) cmd_ls ;;
+  stop | start | rm) cmd_lifecycle "$@" ;;
+  build) shift; cmd_build "$@" ;;
+  -h | --help | help | "") usage ;;
+  *) die "unknown command: $1 (try: hbox help)" ;;
+esac

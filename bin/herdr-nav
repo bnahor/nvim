@@ -1,0 +1,30 @@
+#!/bin/sh
+# herdr-nav <left|down|up|right> <key>
+#
+# Bound in herdr to ctrl+h/j/k/l. If the focused pane is running Neovim, pass
+# the key through so Neovim can move between its own splits (and call back into
+# herdr when it reaches an edge). Otherwise move herdr focus directly.
+#
+# Neovim inside an hbox is deliberately not matched: it can't call herdr when it
+# reaches an edge, so ctrl+h/j/k/l always move herdr focus from a box pane
+# (use <C-w>h/j/k/l for splits inside a box's Neovim).
+set -u
+
+dir=$1
+key=$2
+herdr=${HERDR_BIN_PATH:-herdr}
+pane=${HERDR_ACTIVE_PANE_ID:-}
+
+if [ -z "$pane" ]; then
+  exec "$herdr" pane focus --direction "$dir"
+fi
+
+# The foreground process list is JSON; a plain match is enough and avoids a jq dependency.
+info=$("$herdr" pane process-info --pane "$pane" 2>/dev/null)
+case $info in
+  *'"name":"nvim"'* | *'"name":"vim"'*)
+    exec "$herdr" pane send-keys "$pane" "$key"
+    ;;
+esac
+
+exec "$herdr" pane focus --direction "$dir" --pane "$pane"
