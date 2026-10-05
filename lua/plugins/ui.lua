@@ -54,6 +54,9 @@ if env.label then
 end
 
 require('snacks').setup {
+  -- The start screen has no folds to show; without this the global
+  -- foldcolumn draws stray fold markers down its left edge.
+  styles = { dashboard = { wo = { foldcolumn = '0' } } },
   bigfile = { enabled = true },
   quickfile = { enabled = true },
   notifier = { enabled = true },
