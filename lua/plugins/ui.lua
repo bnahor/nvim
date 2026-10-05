@@ -79,7 +79,16 @@ require('snacks').setup {
     sections = {
       { section = 'header' },
       { section = 'keys', gap = 1, padding = 1 },
-      { section = 'startup' },
+      -- Snacks' own 'startup' section reads lazy.nvim's stats, which this config doesn't have.
+      function()
+        local ms = (vim.uv.hrtime() - (vim.g.herdvim_start or vim.uv.hrtime())) / 1e6
+        return {
+          align = 'center',
+          text = {
+            { ('⚡ %d plugins · started in %.0f ms'):format(#vim.pack.get(), ms), hl = 'SnacksDashboardFooter' },
+          },
+        }
+      end,
     },
     preset = {
       header = header,

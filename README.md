@@ -184,6 +184,16 @@ other pane, herdr moves focus directly.
 - **Neovim inside a box:** it can't reach herdr, so `ctrl+h/j/k/l` always move
   herdr focus from a box pane. Use `<C-w>h/j/k/l` for splits inside it.
 
+## Checking a change
+
+```sh
+scripts/check.sh
+```
+
+Starts the config in a real terminal (a detached tmux session) and fails if
+anything was reported on the way up. `nvim --headless` alone misses errors
+from `UIEnter`, which is where the dashboard and most UI plugins start.
+
 ## Credits
 
 This started as a fork of [iyioon/nvim](https://github.com/iyioon/nvim), which

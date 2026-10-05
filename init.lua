@@ -10,6 +10,9 @@
 --   core.keymaps  -> editor keymaps that don't belong to a plugin
 --   local.lua     -> optional, git-ignored personal overrides
 
+-- For the dashboard's "started in N ms".
+vim.g.herdvim_start = vim.uv.hrtime()
+
 if vim.fn.has 'nvim-0.12' == 0 then
   vim.notify('herdvim needs Neovim 0.12+ (for vim.pack). Found ' .. tostring(vim.version()), vim.log.levels.ERROR)
   return
