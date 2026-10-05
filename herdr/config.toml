@@ -107,3 +107,9 @@ rows = [
   ["state_icon", { token = "machine", fg = "#5ef1ff", bold = true }, "workspace", "tab"],
   ["agent", { token = "$file", dim = true }],
 ]
+
+# Tell me when an agent finishes or needs me while I'm looking elsewhere.
+# "terminal" asks the outer terminal (Ghostty) for a desktop notification,
+# which also works over SSH. Use "herdr" for in-app toasts only, "off" to mute.
+[ui.toast]
+delivery = "terminal"

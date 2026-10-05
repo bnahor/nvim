@@ -41,6 +41,16 @@ to `~/.config/nvim.bak-<timestamp>`. It also links `hbox`, `hremote` and
 `herdr-nav` into `~/.local/bin`. If you don't already have a herdr config, it
 links `herdr/config.toml` as yours. Nothing gets deleted.
 
+With herdr installed it also adds tab completion for fish, and offers to install
+herdr's integrations for the coding agents it finds (Claude Code, Codex,
+Cursor, OpenCode, Pi, Devin, Copilot, Antigravity). With an integration, the
+agent reports its exact state to herdr and comes back in the same conversation
+after a herdr restart. Each one adds a hook to that agent's own config.
+
+The herdr config turns on desktop notifications (`[ui.toast]`, through your
+terminal), so you hear about an agent that finishes or needs you while you're
+looking elsewhere. The first one asks Ghostty for notification permission.
+
 - **Try it without replacing your config:** `./install.sh --appname herdvim`,
   then run `herdvim`.
 - **No sudo or brew:** `./install.sh --tools` installs nvim, tree-sitter, rg, fd

@@ -108,6 +108,30 @@ if [ $HERDR = 1 ]; then
   fi
 fi
 
+if [ $HERDR = 1 ] && command -v herdr >/dev/null; then
+  # Tab completion for the herdr CLI.
+  if command -v fish >/dev/null; then
+    mkdir -p "$CONFIG_HOME/fish/completions"
+    herdr completion fish >"$CONFIG_HOME/fish/completions/herdr.fish"
+  fi
+  # Agent integrations: agents report their exact state to herdr and resume
+  # their conversation after a herdr restart. Each adds a hook to that agent's
+  # own config, so ask first. (target:command)
+  agents=""
+  for pair in claude:claude codex:codex cursor:cursor-agent opencode:opencode pi:pi devin:devin copilot:copilot antigravity-cli:agy; do
+    command -v "${pair#*:}" >/dev/null && agents="$agents ${pair%%:*}"
+  done
+  if [ -n "$agents" ] && confirm "Install herdr integrations for:$agents? (adds a hook to each agent's config)"; then
+    for a in $agents; do
+      if herdr integration install "$a" >/dev/null 2>&1; then
+        say "herdr integration: $a"
+      else
+        warn "herdr integration for $a didn't install; run 'herdr integration install $a' to see why"
+      fi
+    done
+  fi
+fi
+
 # --- plugins ---------------------------------------------------------------------
 
 say "installing plugins (vim.pack, pinned by nvim-pack-lock.json)…"
