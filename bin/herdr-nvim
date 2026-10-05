@@ -1,0 +1,62 @@
+#!/bin/sh
+# herdr-nvim [nvim args...] — Neovim, always inside herdr.
+#
+# Outside herdr it starts the herdr server if it isn't running, opens Neovim in
+# a new tab of this project's workspace (creating the workspace the first
+# time), and attaches herdr to this terminal. Inside herdr, or when this isn't
+# an interactive terminal (scripts, git's editor, --headless), it's plain nvim.
+#
+# Your shell's `nvim` calls this; `command nvim` always gets plain Neovim.
+set -eu
+
+plain() { exec nvim "$@"; }
+
+[ "${HERDR_ENV:-}" = 1 ] && plain "$@"
+[ -t 0 ] && [ -t 1 ] || plain "$@"
+command -v herdr >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 || plain "$@"
+for arg in "$@"; do
+  case $arg in --headless | --embed | -l | -es | -Es | --version | -v | --help | -h) plain "$@" ;; esac
+done
+
+# The server, started in the background if needed. Nothing to manage: it keeps
+# your panes alive when you close the terminal, and `herdr server stop` ends it.
+if ! herdr workspace list >/dev/null 2>&1; then
+  (cd "$HOME" && nohup herdr server >/dev/null 2>&1 &)
+  i=0
+  until herdr workspace list >/dev/null 2>&1; do
+    i=$((i + 1))
+    [ $i -lt 100 ] || { echo "herdr-nvim: herdr server didn't start; opening plain nvim" >&2; plain "$@"; }
+    sleep 0.05
+  done
+fi
+
+dir=$(pwd -P)
+
+# This project's workspace: one we tagged with its directory, else any
+# workspace with a pane sitting in it.
+ws=$(herdr workspace list | jq -r --arg d "$dir" \
+  '.result.workspaces[] | select((.tokens // {}).dir == $d) | .workspace_id' | head -n 1)
+if [ -z "$ws" ]; then
+  ws=$(herdr pane list | jq -r --arg d "$dir" \
+    '.result.panes[] | select(.cwd == $d) | .workspace_id' | head -n 1)
+fi
+
+if [ -n "$ws" ]; then
+  pane=$(herdr tab create --workspace "$ws" --cwd "$dir" --label nvim --focus | jq -r .result.root_pane.pane_id)
+  herdr workspace focus "$ws" >/dev/null
+else
+  res=$(herdr workspace create --cwd "$dir" --label "$(basename "$dir")" --focus)
+  ws=$(printf '%s' "$res" | jq -r .result.workspace.workspace_id)
+  pane=$(printf '%s' "$res" | jq -r .result.root_pane.pane_id)
+  herdr workspace report-metadata "$ws" --source herdr-nvim --token "dir=$dir" >/dev/null
+fi
+
+# Quote each argument for the pane's shell. 'it'\''s' works in sh, bash, zsh
+# and fish alike. When Neovim exits you're left at a shell in the project.
+cmd=nvim
+for arg in "$@"; do
+  cmd="$cmd '$(printf '%s' "$arg" | sed "s/'/'\\\\''/g")'"
+done
+herdr pane run "$pane" "$cmd" >/dev/null
+
+exec herdr

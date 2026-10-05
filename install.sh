@@ -87,7 +87,7 @@ fi
 link "$REPO" "$target"
 
 mkdir -p "$BIN"
-for f in herdr-nav hbox hremote; do
+for f in herdr-nav herdr-nvim hbox hremote; do
   link "$REPO/bin/$f" "$BIN/$f"
 done
 case ":$PATH:" in *":$BIN:"*) ;; *) warn "add $BIN to your PATH" ;; esac
@@ -121,6 +121,18 @@ if [ $HERDR = 1 ] && command -v herdr >/dev/null; then
   for pair in claude:claude codex:codex cursor:cursor-agent opencode:opencode pi:pi devin:devin copilot:copilot antigravity-cli:agy; do
     command -v "${pair#*:}" >/dev/null && agents="$agents ${pair%%:*}"
   done
+  # `nvim` opens inside herdr (starting it if needed). Plain Neovim stays one
+  # `command nvim` away, and scripts and git's editor are never affected.
+  if confirm "Make 'nvim' open inside herdr automatically?"; then
+    if command -v fish >/dev/null; then
+      link "$REPO/shell/nvim.fish" "$CONFIG_HOME/fish/functions/nvim.fish"
+    fi
+    zline="[ -f \"$REPO/shell/nvim.zsh\" ] && source \"$REPO/shell/nvim.zsh\"  # herdvim: nvim inside herdr"
+    if [ -f "$HOME/.zshrc" ] && ! grep -qF "$REPO/shell/nvim.zsh" "$HOME/.zshrc"; then
+      printf '\n%s\n' "$zline" >>"$HOME/.zshrc"
+    fi
+    say "'nvim' now opens inside herdr (open a new shell to pick it up)"
+  fi
   if [ -n "$agents" ] && confirm "Install herdr integrations for:$agents? (adds a hook to each agent's config)"; then
     for a in $agents; do
       if herdr integration install "$a" >/dev/null 2>&1; then

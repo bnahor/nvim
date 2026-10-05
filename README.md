@@ -56,7 +56,14 @@ looking elsewhere. The first one asks Ghostty for notification permission.
 - **No sudo or brew:** `./install.sh --tools` installs nvim, tree-sitter, rg, fd
   and lazygit into `~/.local`.
 
-Start herdr (`herdr`) and open `nvim` inside it.
+Then just type `nvim`. Outside herdr, `bin/herdr-nvim` starts the herdr server
+in the background if it isn't running, opens Neovim in a new tab of this
+project's workspace (creating it the first time), and attaches herdr to your
+terminal. Close the terminal and everything keeps running; `nvim` again from the
+same folder brings you back to that workspace. Inside herdr, in scripts, and as
+git's editor it's plain Neovim, and `command nvim` always is. `install.sh` asks
+before adding this `nvim` function to fish and zsh; `herdr server stop` ends it
+all.
 
 ## Keys
 
